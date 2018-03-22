@@ -1,115 +1,91 @@
-## 前言
+#  如何更优雅的给控制器“减负”
 
-前不久把网站升级到了`HTTPS`。
-看了下阿里云的证书价格，望而生畏。于是搜了一下免费的`SSL`证书，果然，[Let's
-Encrypt](https://letsencrypt.org/)这个平台免费提供三个月的证书。于是乎参考[Let's Encrypt，免费好用的
-HTTPS 证书](https://imququ.com/post/letsencrypt-certificate.html)进行折腾，但是始终卡在
+Published on Mar 21, 2018 in
+[Listen](https://www.hellonine.top/index.php/category/listen/)[PHP](https://www.hellonine.top/index.php/category/PHP/)
+with  0 comment
 
-> 找不到 /etc/ssl/openssl.cnf 文件
+[PHP](https://www.hellonine.top/index.php/tag/PHP/)
+[Listen](https://www.hellonine.top/index.php/tag/Listen/)
 
-这一步，于是换了官方工具`Certbot`执行，验证成功。
+`MVC`是一个非常伟大的概念，但是最近我发现一个现象，包括我自己，我们在最开始接触`MVC`概念时，我们非常严谨地贯彻这种分层思想，`Controller`层处理业务逻辑，而`Model`层只是单纯的处理数据`I/O`。但是，伴随着我们项目体量的逐渐增大，控制器的负担也越来越大。这样一来会有一个非常明显的弊端，当我们在定位`BUG`时，我们总是需要对照着代码查看许久。除此之外，彼此的业务代码并没有太好的关联，这使得我们想要抽出一个`Service`时就显得极为困难。
+因此，是时候给我们的控制器做一些“减负”了。这里的减负并不意味着会违背`MVC`的设计思想，而是把我们的控制器层的业务适当的分给其他部分。
+有使用过一些主流框架的朋友应该都知道，其实很多框架都给`Controller`层做了一些“减负”的工作，比如`KOA`里面的`middleware`，抑或是`Laravel`里面的`Event`,`Policy`等。
+但是事与愿违，即使这些框架提供了这些帮助，但是许多人在实际项目中使用到的却很少，当然，也有可能是我接触到的代码不够多。究其原因，窃以为尚未意识到这种理念的重要性。因此，我在这里总结了自己这些年来“减负”的一些经验，同时我也会配合一些代码予以解释。当然，我所写的未必全对，因此希望有幸看到的读者能保持自己的独立性。
 
-## 开始
+## 向`Model`分流
 
-### 下载
-
-首先需要下载`certbot-auto`这个脚本，并让这个脚本可以被所有用户组用户执行:
-
-
-
-    wget https://dl.eff.org/certbot-auto
-    chmod a+x ./certbot-auto
-
-### 生成证书
-
-接着我们执行生成证书的指令:
+我们在写代码时往往会有这样一种场景，我们需要对从`Model`取出来的数据进行加工，但是，加工数据的部分我们经常会放到控制器，毕竟这属于业务逻辑，确实无可厚非，如下伪代码所示:
 
 
 
-    ./certbot-auto certonly --webroot -w /data/wwwroot/typecho -d www.hellonine.top
-
-`-w`对应的是我们的站点目录，`-d`对应的是我们的域名。
-
-我的`Linux`是`CentOS6.5`，默认安装的是`Python2`，所以在执行的过程中会发现必须要升级到`Python3`，因此需要先把`Python`升级并且更新`/usr/bin`下面的`Python`软链:
-
-
-
-    wget https://www.python.org/ftp/python/3.6.0/Python-3.6.0.tgz
-    tar zxvf Python-3.6.0.tgz && cd Python-3.6.0
-    ./configure
-    make all && make install && make clean
-
-为了防止出错，我们需要把原来的做一个备份:
-
-
-
-    mv /usr/bin/python /usr/bin/python2.6.6
-    ln -s /usr/local/bin/python3.6 /usr/bin/python
-    python -V
-
-此时我们会发现，`python`的软链已经完成。不过为了兼容之前`python2`安装的一些软件，我们需要修改我们的`yum`:
-
-
-
-    vi /usr/bin/yum
-
-将`#!/usr/bin/python`修改为`#!/usr/bin/python2.6.6`
-
-这个时候我们再去执行之前的指令，又会发现另外一个错误，告诉我们需要安装一个`urllib2`的包，于是执行:
-
-
-
-    pip install urllib2
-
-此时，我们的证书已经下载完毕，可以在`/etc/letsencrypt/live/$your_domain`下面进行查看。
-
-### 修改nginx
-
-此时，我们在`nginx`中设置我们已经下载好的公钥和私钥的地址即可:
-
-
-
-    ssl_certificate      /etc/letsencrypt/live/$your_domain/fullchain.pem;
-    ssl_certificate_key     /etc/letsencrypt/live/$your_domain/privkey.pem;
-
-如果你愿意，也可以让`HTTP`重定向到`HTTPS`:
-
-
-
-    server {
-            listen 80;
-            server_name www.hellonine.top hellonine.top;
-            return 301 https://$server_name$request_uri;
+    // controller
+    public function userList()
+    {
+        $users = array_map(function ($user){
+    //        这里会对我们的代码进行业务逻辑的加工
+            $user['created_at'] = date('Y-m-d' , $user['created_at']);
+            // ...
+            return $user;
+        } ,$model->availableList());
     }
 
-### 定期更新脚本
+    // model
+    public function availableList()
+    {
+        // 从数据库取数据
+        return $users;
+    }
 
-由于证书90天过期，所以我们需要有一个`crontab`来完成我们的定期更新任务:
+但是我们有没有考虑过这样一个问题，当我们同事来接手我们项目或者我们`debug`时，我们需要了解的代码量非常大，特别是涉及到一些数据加工的格式问题，我们并不需要关心。或者换个角度，当我们遇到数据加工的`bug`时，我们能第一联想到这段代码是放在`Model`层时，是不是更加快捷呢？
 
 
 
-    30 1 * */2 6 /your_path/certbot-auto renew --quiet --no-self-upgrade > /dev/null 2>&1
+    // controller
+    public function userList()
+    {
+        $users = $model->availableList();
+    //    处理其他逻辑
+    }
 
-其实我比较想聊一下这个`> /dev/null 2>&1`指令，而这个指令也是我们经常会看到的一个指令，他的意思用一句话概括就是:
+    // model
+    public function availableList()
+    {
+        // 从数据库取数据 $users
+        return array_map(function ($user){
+    //        这里会对我们的代码进行业务逻辑的加工
+            $user['created_at'] = date('Y-m-d' , $user['created_at']);
+            // ...
+            return $user;
+        } , $users);
+    }
 
-> 丢弃所有的标准输出和标准错误
+如上代码所示，在`Model`层中已经帮我们封装好了我们所需要的数据以及其格式，当我们在浏览他人代码时，我们并不需要关心他的格式是怎么加工的，我们只需要根据他对方法的命名就能知道是获取的怎样的数据。
 
-#### >
+## 分离`Controller`
 
-`>`指令非常常见，就是我们在`shell`中的重定向，这里不多做赘述。
+在写具体的方法之前，我想要阐述的一点是，我们在写代码的时候需要保持一定的前瞻性。什么意思？虽然我们的大部分工作都是跟具体的业务逻辑打交道，但是我们经常会发现总会有重复的工作，那么有的人会直接把这段代码复制。但是，在我们复制之前，我们是不是可以问自己这样一个问题：如果接下来还有类似的业务，我们还是复制吗？我们是不是可以把这段基于我们项目的代码抽象出一个`Service`呢？
+我举个例子，比如一个网站，可能会有打赏功能，可能也有付费阅读功能，我们不难发现，这两种付费有着相似的地方，比如创建本平台订单系统的业务逻辑，再比如回掉时可能存在的相同业务逻辑，所以这段代码我们是不是可以以一个`trait`的形式做一个`Service`。
 
-#### /dev/null
 
-`/dev/null`代表一个会被丢失的“黑洞”，即我们无法找到输出的内容。
 
-#### 2>&1
+    trait PayService
+    {
+        private $_callback = null;
 
-在`shell`中，0代表标准输入，1代表标准输出，2代表标准错误，其实这些数值我们也经常在一些语言作为预定义常量见到，比如PHP。
-而中间的`&`代表二者使用同一个文件描述符，让二者在同一个地方输出。
+        public function createOrder()
+        {
+    //        处理你的业务逻辑，配置调用三方支付接口的参数等
+        }
 
-## 参考
+        public function callback()
+        {
+    //        处理共同的回调逻辑
 
-[HTTPS 简介及使用官方工具 Certbot 配置 Let’s Encrypt SSL 安全证书详细教程](https://linuxstory.org
-/deploy-lets-encrypt-ssl-certificate-with-certbot/)
-[shell中>/dev/null
-2>&1是什么鬼？](http://www.kissyu.org/2016/12/25/shell%E4%B8%AD%3E%20:dev:null%202%20%3E%20&1%E6%98%AF%E4%BB%80%E4%B9%88%E9%AC%BC%EF%BC%9F/)
+            $this->handler();
+        }
+    }
+
+这里我们保留了一个`handler`方法来处理每个功能独有的业务逻辑，至此，我们就可以非常方便的扩展我们的支付服务了。
+
+给控制器减负的方法还有很多，比如对我们加工数据的部分，其实我们也可以不放到`Model`，我们也可以单独开辟一层来处理我们的数据加工。让控制器变得清晰明朗，每个人阅读代码时都能非常快速的了解控制器下的每个方法在处理什么业务逻辑。这便是我们给控制器减负的目的。
+我很喜欢「包」的概念和设计思想，当我们在使用包时，不仅仅意味着方便，更重要的是，他做为一个独立的“组件”存在于我们的代码逻辑中，与我们项目的代码不存在任何的耦合，同时我们也无需知道他的具体实现。
